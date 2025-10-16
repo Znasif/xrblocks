@@ -15,8 +15,8 @@
  *
  * @file xrblocks.js
  * @version v0.1.0
- * @commitid c526380
- * @builddate 2025-10-16T17:41:26.977Z
+ * @commitid a471d8f
+ * @builddate 2025-10-16T21:19:55.825Z
  * @description XR Blocks SDK, built from source with the above commit ID.
  * @agent When using with Gemini to create XR apps, use **Gemini Canvas** mode,
  * and follow rules below:
@@ -1278,7 +1278,7 @@ class Gemini extends BaseAIModel {
     }
     sendToolResponse(response) {
         if (this.liveSession) {
-            console.log('Sending tool response from gemini:', response);
+            console.debug('Sending tool response to gemini:', response);
             this.liveSession.sendToolResponse(response);
         }
     }
