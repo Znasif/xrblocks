@@ -12,7 +12,6 @@ export class AudioPlayer extends Script {
   private options: AudioPlayerOptions = {};
   private audioContext?: AudioContext;
   private audioQueue: AudioBuffer[] = [];
-  private isPlaying = false;
   private nextStartTime = 0;
   private gainNode?: GainNode;
   private categoryVolumes?: CategoryVolumes;
@@ -28,7 +27,8 @@ export class AudioPlayer extends Script {
   }
 
   /**
-   * Sets the CategoryVolumes instance for this player to respect master/category volumes
+   * Sets the CategoryVolumes instance for this player to respect
+   * master/category volumes
    */
   setCategoryVolumes(categoryVolumes: CategoryVolumes) {
     this.categoryVolumes = categoryVolumes;
@@ -49,8 +49,8 @@ export class AudioPlayer extends Script {
    */
   updateGainNodeVolume() {
     if (this.gainNode && this.categoryVolumes) {
-      const effectiveVolume = this.categoryVolumes.getEffectiveVolume(
-          this.category, this.volume);
+      const effectiveVolume =
+          this.categoryVolumes.getEffectiveVolume(this.category, this.volume);
       this.gainNode.gain.value = effectiveVolume;
     } else if (this.gainNode) {
       this.gainNode.gain.value = this.volume;
@@ -62,13 +62,13 @@ export class AudioPlayer extends Script {
       this.audioContext =
           new AudioContext({sampleRate: this.options.sampleRate});
       this.nextStartTime = this.audioContext.currentTime;
-      
+
       // Create gain node for volume control
       this.gainNode = this.audioContext.createGain();
       this.gainNode.connect(this.audioContext.destination);
       this.updateGainNodeVolume();
     }
-    
+
     // Ensure audio context is running (not suspended)
     if (this.audioContext.state === 'suspended') {
       await this.audioContext.resume();
@@ -92,42 +92,34 @@ export class AudioPlayer extends Script {
     }
 
     this.audioQueue.push(audioBuffer);
-    if (!this.isPlaying) this.playNextAudioBuffer();
+    this.scheduleAudioBuffers();
   }
 
-  playNextAudioBuffer() {
-    if (this.audioQueue.length === 0) {
-      this.isPlaying = false;
-      return;
+  scheduleAudioBuffers() {
+    while (this.audioQueue.length > 0) {
+      const audioBuffer = this.audioQueue.shift()!;
+      const currentTime = this.audioContext!.currentTime;
+      const startTime = Math.max(this.nextStartTime, currentTime);
+
+      const source = this.audioContext!.createBufferSource();
+      source.buffer = audioBuffer;
+
+      // Connect through gain node for volume control
+      source.connect(this.gainNode || this.audioContext!.destination);
+
+      // Start playback
+      source.start(startTime);
+
+      this.nextStartTime = startTime + audioBuffer.duration;
     }
-
-    this.isPlaying = true;
-    const audioBuffer = this.audioQueue.shift()!;
-    const currentTime = this.audioContext!.currentTime;
-    const startTime = Math.max(this.nextStartTime, currentTime);
-
-    const source = this.audioContext!.createBufferSource();
-    source.buffer = audioBuffer;
-    
-    // Connect through gain node for volume control
-    source.connect(this.gainNode || this.audioContext!.destination);
-    source.onended = () => this.playNextAudioBuffer();
-    
-    // Start playback
-    source.start(startTime);
-    
-    // Calculate next start time with a tiny overlap to prevent gaps
-    // This helps create smooth transitions between audio chunks
-    this.nextStartTime = startTime + audioBuffer.duration - 0.001;
   }
 
   clearQueue() {
     this.audioQueue = [];
-    this.isPlaying = false;
   }
 
   getIsPlaying() {
-    return this.isPlaying;
+    return this.nextStartTime > this.audioContext!.currentTime;
   }
 
   getQueueLength() {
@@ -149,7 +141,7 @@ export class AudioPlayer extends Script {
       this.audioContext.close();
       this.audioContext = undefined;
       this.gainNode = undefined;
-      this.nextStartTime = 0; // Reset timing
+      this.nextStartTime = 0;  // Reset timing
     }
   }
 
