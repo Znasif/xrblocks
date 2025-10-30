@@ -15,8 +15,8 @@
  *
  * @file xrblocks.js
  * @version v0.2.0
- * @commitid 043ea67
- * @builddate 2025-10-30T16:16:53.387Z
+ * @commitid 212f4c1
+ * @builddate 2025-10-30T16:28:59.773Z
  * @description XR Blocks SDK, built from source with the above commit ID.
  * @agent When using with Gemini to create XR apps, use **Gemini Canvas** mode,
  * and follow rules below:
@@ -5572,7 +5572,7 @@ class Input {
      */
     intersectObjectByController(controller, obj) {
         controller.updateMatrixWorld();
-        this.raycaster.setFromXRController(controller);
+        this._setRaycasterFromController(controller);
         return this.raycaster.intersectObject(obj, false);
     }
     /**
