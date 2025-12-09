@@ -147,3 +147,6 @@ dist
 # Build
 build
 .DS_Store
+
+# Keys
+keys.json

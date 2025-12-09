@@ -25,6 +25,8 @@ This project follows
 
 ## Contribution process
 
+Please follow the development guide in README.md
+
 ### Code reviews
 
 All submissions, including submissions by project members, require review. We
