@@ -1,6 +1,6 @@
 {
   "name": "xrblocks",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "XR Blocks SDK",
   "main": "build/xrblocks.js",
   "types": "build/xrblocks.d.ts",
@@ -11,8 +11,8 @@
     "prepare": "npm run build",
     "lint": "eslint src",
     "format": "npm run format:fix",
-    "format:check": "prettier \"**/*.{cjs,html,js,json,md,mdx,ts}\" --check",
-    "format:fix": "prettier \"**/*.{cjs,html,js,json,md,mdx,ts}\" --write"
+    "format:check": "prettier \"**/*.{cjs,html,js,json,md,mdx,ts,css}\" --check",
+    "format:fix": "prettier \"**/*.{cjs,html,js,json,md,mdx,ts,css}\" --write"
   },
   "files": [
     "build"
