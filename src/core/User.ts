@@ -14,6 +14,8 @@ type MaybeHasIgnoreReticleRaycast = {
   ignoreReticleRaycast?: boolean;
 };
 
+const tempBox = new THREE.Box3();
+
 /**
  * User is an embodied instance to manage hands, controllers, speech, and
  * avatars. It extends Script to update human-world interaction.
@@ -440,8 +442,8 @@ export class User extends Script {
       const currentlyTouchedMeshes: THREE.Mesh[] = [];
       this.scene.traverse((object) => {
         if ((object as Partial<THREE.Mesh>).isMesh && object.visible) {
-          const boundingBox = new THREE.Box3().setFromObject(object);
-          if (boundingBox.containsPoint(indexTipPosition)) {
+          tempBox.setFromObject(object);
+          if (tempBox.containsPoint(indexTipPosition)) {
             currentlyTouchedMeshes.push(object as THREE.Mesh);
           }
         }
