@@ -20,6 +20,10 @@ export class ScriptsManager {
   /** The set of scripts currently being initialized. */
   private initializingScripts = new Set<Script>();
 
+  private seenScripts = new Set<Script>();
+  private syncPromises: Promise<void>[] = [];
+  private checkScriptBound = this.checkScript.bind(this);
+
   constructor(private initScriptFunction: (script: Script) => Promise<void>) {}
 
   /**
@@ -54,28 +58,38 @@ export class ScriptsManager {
   }
 
   /**
+   * Helper for scene traversal to avoid closure allocation.
+   */
+  private checkScript(obj: THREE.Object3D) {
+    if ((obj as MaybeScript).isXRScript) {
+      const script = obj as Script;
+      this.syncPromises.push(this.initScript(script));
+      this.seenScripts.add(script);
+    }
+  }
+
+  /**
    * Finds all scripts in the scene and initializes them or uninitailizes them.
    * Returns a promise which resolves when all new scripts are finished
    * initalizing.
    * @param scene - The main scene which is used to find scripts.
    */
-  async syncScriptsWithScene(scene: THREE.Scene) {
-    const seenScripts = new Set<Script>();
-    const promises: Promise<void>[] = [];
-    scene.traverse((obj) => {
-      if ((obj as MaybeScript).isXRScript) {
-        const script = obj as Script;
-        promises.push(this.initScript(script));
-        seenScripts.add(script);
-      }
-    });
-    await Promise.allSettled(promises);
+  syncScriptsWithScene(
+    scene: THREE.Scene
+  ): Promise<PromiseSettledResult<void>[]> {
+    this.seenScripts.clear();
+    this.syncPromises.length = 0;
+
+    scene.traverse(this.checkScriptBound);
+
     // Delete missing scripts.
     for (const script of this.scripts) {
-      if (!seenScripts.has(script)) {
+      if (!this.seenScripts.has(script)) {
         this.uninitScript(script);
       }
     }
+
+    return Promise.allSettled(this.syncPromises);
   }
 
   callSelectStart(event: SelectEvent) {
