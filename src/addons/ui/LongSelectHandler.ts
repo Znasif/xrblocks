@@ -1,17 +1,42 @@
 import * as THREE from 'three';
 import * as xb from 'xrblocks';
 
-function easeInQuad(x) {
+function easeInQuad(x: number) {
   return x * x;
 }
 
-function easeOutQuint(x) {
+function easeOutQuint(x: number) {
   return 1 - Math.pow(1 - x, 5);
 }
 
-export class TriggerManager extends xb.Script {
+export class LongSelectHandler extends xb.Script {
+  protected triggerDelay: number;
+  protected triggerCooldownDuration: number;
+  protected pulseAnimationDuration: number;
+  protected visualizerColor: number;
+  protected visualizerRadius: number;
+
+  private triggerTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  private lastTriggerTime = 0;
+  private isTriggerOnCooldown = false;
+  private activeHandedness: XRHandedness | null = null;
+  private triggerStartTime = 0;
+  private isPulsing = false;
+  private pulseStartTime = 0;
+
+  private outerVisualizer: THREE.Mesh | null = null;
+  private innerVisualizer: THREE.Mesh | null = null;
+
+  private outerMaterialOpacity = 0.3;
+  private innerMaterialOpacity = 0.6;
+
+  private sphereGeometry: THREE.SphereGeometry;
+  private outerMaterial: THREE.MeshBasicMaterial;
+  private innerMaterial: THREE.MeshBasicMaterial;
+
   constructor(
-    onTrigger,
+    protected onTrigger: () => void,
     {
       triggerDelay = 1000,
       triggerCooldownDuration = 5000,
@@ -21,23 +46,11 @@ export class TriggerManager extends xb.Script {
     } = {}
   ) {
     super();
-    this.onTrigger = onTrigger;
     this.triggerDelay = triggerDelay;
     this.triggerCooldownDuration = triggerCooldownDuration;
     this.pulseAnimationDuration = pulseAnimationDuration;
     this.visualizerColor = visualizerColor;
     this.visualizerRadius = visualizerRadius;
-
-    this.triggerTimeout = null;
-    this.lastTriggerTime = 0;
-    this.isTriggerOnCooldown = false;
-    this.activeHandedness = null;
-    this.triggerStartTime = 0;
-    this.isPulsing = false;
-    this.pulseStartTime = 0;
-
-    this.outerVisualizer = null;
-    this.innerVisualizer = null;
 
     this.sphereGeometry = new THREE.SphereGeometry(
       this.visualizerRadius,
@@ -45,7 +58,6 @@ export class TriggerManager extends xb.Script {
       32
     );
 
-    this.outerMaterialOpacity = 0.3;
     this.outerMaterial = new THREE.MeshBasicMaterial({
       color: this.visualizerColor,
       transparent: true,
@@ -53,7 +65,6 @@ export class TriggerManager extends xb.Script {
       depthWrite: false,
     });
 
-    this.innerMaterialOpacity = 0.6;
     this.innerMaterial = new THREE.MeshBasicMaterial({
       color: this.visualizerColor,
       transparent: true,
@@ -62,16 +73,17 @@ export class TriggerManager extends xb.Script {
     });
   }
 
-  onSelectStart(event) {
-    if (event.data && event.data.handedness) {
-      this.activeHandedness = event.data.handedness;
+  override onSelectStart(event: xb.SelectEvent) {
+    const inputSource = event.target.inputSource;
+    if (inputSource && inputSource.handedness) {
+      this.activeHandedness = inputSource.handedness;
     } else {
       console.warn('Could not determine handedness from onSelectStart event.');
       this.activeHandedness = null;
     }
   }
 
-  onSelecting(event) {
+  override onSelecting() {
     if (this.isPulsing) {
       this.updateVisualizers();
       return;
@@ -98,7 +110,7 @@ export class TriggerManager extends xb.Script {
     this.updateVisualizers();
   }
 
-  onSelectEnd(event) {
+  override onSelectEnd() {
     this.removeVisualizers();
     if (this.triggerTimeout) {
       clearTimeout(this.triggerTimeout);
@@ -107,7 +119,7 @@ export class TriggerManager extends xb.Script {
     this.activeHandedness = null;
   }
 
-  _triggerSelection() {
+  private _triggerSelection() {
     const currentTime = Date.now();
     if (currentTime - this.lastTriggerTime < this.triggerCooldownDuration) {
       return;
@@ -134,7 +146,7 @@ export class TriggerManager extends xb.Script {
     }
   }
 
-  createVisualizers(parent) {
+  private createVisualizers(parent: THREE.Object3D) {
     this.removeVisualizers();
     this.outerMaterial.opacity = this.outerMaterialOpacity;
     this.innerMaterial.opacity = this.innerMaterialOpacity;
