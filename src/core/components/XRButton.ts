@@ -15,6 +15,8 @@ export class XRButton {
   constructor(
     private sessionManager: WebXRSessionManager,
     private permissionsManager: PermissionsManager,
+    private appTitle = '',
+    private appDescription = '',
     private startText = 'ENTER XR',
     private endText = 'END XR',
     private invalidText = 'XR NOT SUPPORTED',
@@ -28,6 +30,8 @@ export class XRButton {
     }
   ) {
     this.domElement.id = XRBUTTON_WRAPPER_ID;
+    this.createXRAppTitle();
+    this.createXRAppDescription();
     this.createXRButtonElement();
 
     if (showEnterSimulatorButton) {
@@ -59,6 +63,24 @@ export class XRButton {
       this.startSimulator();
     };
     this.domElement.appendChild(this.simulatorButtonElement);
+  }
+
+  private createXRAppTitle() {
+    if (!this.appTitle) {
+      return;
+    }
+    const appTitle = document.createElement('h1');
+    appTitle.textContent = this.appTitle;
+    this.domElement.appendChild(appTitle);
+  }
+
+  private createXRAppDescription() {
+    if (!this.appDescription) {
+      return;
+    }
+    const appDescription = document.createElement('h4');
+    appDescription.textContent = this.appDescription;
+    this.domElement.appendChild(appDescription);
   }
 
   private createXRButtonElement() {

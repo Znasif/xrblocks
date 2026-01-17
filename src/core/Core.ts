@@ -336,6 +336,8 @@ export class Core {
       this.xrButton = new XRButton(
         this.webXRSessionManager,
         this.permissionsManager,
+        options.xrButton?.appTitle,
+        options.xrButton?.appDescription,
         options.xrButton?.startText,
         options.xrButton?.endText,
         options.xrButton?.invalidText,

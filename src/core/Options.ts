@@ -117,6 +117,8 @@ export class Options {
    * Configuration for the XR session button.
    */
   xrButton = {
+    appTitle: '',
+    appDescription: '',
     enabled: true,
     startText: 'Enter XR',
     endText: 'Exit XR',
@@ -253,6 +255,26 @@ export class Options {
    */
   enableXRTransitions() {
     this.transition.enabled = true;
+    return this;
+  }
+
+  /**
+   * Sets the title of the app to be displayed above the XR button.
+   * @param title - The title of the app.
+   * @returns The instance for chaining.
+   */
+  setAppTitle(title: string) {
+    this.xrButton.appTitle = title;
+    return this;
+  }
+
+  /**
+   * Sets the description of the app to be displayed above the XR button.
+   * @param description - The description of the app.
+   * @returns The instance for chaining.
+   */
+  setAppDescription(description: string) {
+    this.xrButton.appDescription = description;
     return this;
   }
 }
