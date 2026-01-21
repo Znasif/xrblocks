@@ -1,16 +1,22 @@
 import * as THREE from 'three';
 
-import {AI} from '../../ai/AI';
-import {AIOptions} from '../../ai/AIOptions';
-import {Gemini} from '../../ai/Gemini';
-import {cropImage, transformRgbUvToWorld} from '../../camera/CameraUtils';
-import {XRDeviceCamera} from '../../camera/XRDeviceCamera';
-import {Script} from '../../core/Script';
-import {Depth} from '../../depth/Depth';
-import {parseBase64DataURL} from '../../utils/utils';
-import {WorldOptions} from '../WorldOptions';
+import { AI } from '../../ai/AI';
+import { AIOptions } from '../../ai/AIOptions';
+import { Gemini } from '../../ai/Gemini';
+import { cropImage, transformRgbUvToWorld } from '../../camera/CameraUtils';
+import { XRDeviceCamera } from '../../camera/XRDeviceCamera';
+import { Script } from '../../core/Script';
+import { Depth } from '../../depth/Depth';
+import { parseBase64DataURL } from '../../utils/utils';
+import { WorldOptions } from '../WorldOptions';
 
-import {DetectedObject} from './DetectedObject';
+import {
+  FilesetResolver,
+  ObjectDetectorResult,
+  ObjectDetector as MediaPipeObjectDetector,
+} from '@mediapipe/tasks-vision';
+
+import { DetectedObject } from './DetectedObject';
 
 /**
  * Detects objects in the user's environment using a specified backend.
@@ -38,6 +44,8 @@ export class ObjectDetector extends Script {
    * The configuration for the Gemini backend.
    */
   private _geminiConfig!: object;
+
+  private _mediaPipeDetector?: MediaPipeObjectDetector;
 
   // Injected dependencies
   private options!: WorldOptions;
@@ -77,7 +85,7 @@ export class ObjectDetector extends Script {
     if (this.options.objects.showDebugVisualizations) {
       this._debugVisualsGroup = new THREE.Group();
       // Disable raycasting for the debug group to prevent interaction errors.
-      this._debugVisualsGroup.raycast = () => {};
+      this._debugVisualsGroup.raycast = () => { };
       this.add(this._debugVisualsGroup);
     }
   }
@@ -93,17 +101,152 @@ export class ObjectDetector extends Script {
     switch (this.options.objects.backendConfig.activeBackend) {
       case 'gemini':
         return this._runGeminiDetection();
-      // Future backends like 'mediapipe' will be handled here.
-      // case 'mediapipe':
-      //   return this._runMediaPipeDetection();
+      case 'mediapipe':
+        return this._runMediaPipeDetection();
       default:
         console.warn(
-          `ObjectDetector backend '${
-            this.options.objects.backendConfig.activeBackend
+          `ObjectDetector backend '${this.options.objects.backendConfig.activeBackend
           }' is not supported.`
         );
         return [];
     }
+  }
+
+  /**
+   * Initializes the MediaPipe ObjectDetector if not already initialized.
+   */
+  private async _initMediaPipeDetector() {
+    if (this._mediaPipeDetector) return;
+
+    const vision = await FilesetResolver.forVisionTasks(
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.2/wasm'
+    );
+    this._mediaPipeDetector = await MediaPipeObjectDetector.createFromOptions(
+      vision,
+      {
+        baseOptions: {
+          modelAssetPath: `https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite`,
+          delegate: 'GPU',
+        },
+        scoreThreshold: 0.5,
+        runningMode: 'IMAGE',
+      }
+    );
+  }
+
+  /**
+   * Runs object detection using the MediaPipe backend.
+   */
+  private async _runMediaPipeDetection() {
+    await this._initMediaPipeDetector();
+    if (!this._mediaPipeDetector) {
+      console.error('MediaPipe ObjectDetector failed to initialize.');
+      return [];
+    }
+
+    const base64Image = this.deviceCamera.getSnapshot({
+      outputFormat: 'base64',
+    }) as string | null;
+
+    if (!base64Image) {
+      console.warn('Could not get device camera snapshot.');
+      return [];
+    }
+
+    // Create an HTMLImageElement from the base64 string.
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = reject;
+      img.src = base64Image;
+    });
+
+    // Cache depth and camera data to align with the captured image frame.
+    const cachedDepthArray = this.depth.depthArray[0].slice(0);
+    const cachedMatrixWorld = this.camera.matrixWorld.clone();
+
+    const result: ObjectDetectorResult = this._mediaPipeDetector.detect(img);
+
+    if (this.options.objects.showDebugVisualizations) {
+      const vizData = result.detections
+        .map((d) => {
+          if (!d.boundingBox) return null;
+          const { originX, originY, width, height } = d.boundingBox;
+          return {
+            xmin: (originX / img.width) * 1000,
+            ymin: (originY / img.height) * 1000,
+            xmax: ((originX + width) / img.width) * 1000,
+            ymax: ((originY + height) / img.height) * 1000,
+            objectName: d.categories[0]?.categoryName,
+          };
+        })
+        .filter(Boolean);
+      this._visualizeBoundingBoxesOnImage(base64Image, vizData as object[]);
+      this._visualizeDepthMap(cachedDepthArray);
+    }
+
+    const detectionPromises = result.detections.map(async (d) => {
+      const box = d.boundingBox;
+      if (!box) return null;
+
+      const centerX = (box.originX + box.width / 2) / img.width;
+      const centerY = (box.originY + box.height / 2) / img.height;
+
+      const uvInput = { u: centerX, v: centerY };
+
+      const projectionMatrix = this.deviceCamera.simulatorCamera
+        ? this.camera.projectionMatrix
+        : new THREE.Matrix4().fromArray(this.depth.view[0].projectionMatrix);
+
+      const worldPosition = transformRgbUvToWorld(
+        uvInput,
+        cachedDepthArray,
+        projectionMatrix,
+        cachedMatrixWorld,
+        this.deviceCamera,
+        this.depth
+      );
+
+      if (worldPosition) {
+        const margin = this.options.objects.objectImageMargin;
+        // Create a normalized bounding box for cropping.
+        const boundingBox = new THREE.Box2(
+          new THREE.Vector2(box.originX / img.width, box.originY / img.height),
+          new THREE.Vector2(
+            (box.originX + box.width) / img.width,
+            (box.originY + box.height) / img.height
+          )
+        );
+        const cropBox = boundingBox.clone();
+        cropBox.min.subScalar(margin);
+        cropBox.max.addScalar(margin);
+
+        const objectImage = await cropImage(base64Image, cropBox);
+
+        const objectName = d.categories[0]?.categoryName || 'Unknown';
+        const object = new DetectedObject(
+          objectName,
+          objectImage,
+          boundingBox,
+          { score: d.categories[0]?.score }
+        );
+        object.position.copy(worldPosition);
+
+        this.add(object);
+        this._detectedObjects.set(object.uuid, object);
+
+        if (this._debugVisualsGroup) {
+          this._createDebugVisual(object);
+        }
+        return object;
+      }
+      return null;
+    });
+
+    const detectedObjects = (await Promise.all(detectionPromises)).filter(
+      Boolean
+    ) as DetectedObject[];
+    return detectedObjects;
   }
 
   /**
@@ -123,7 +266,7 @@ export class ObjectDetector extends Script {
       return [];
     }
 
-    const {mimeType, strippedBase64} = parseBase64DataURL(base64Image);
+    const { mimeType, strippedBase64 } = parseBase64DataURL(base64Image);
 
     // Cache depth and camera data to align with the captured image frame.
     const cachedDepthArray = this.depth.depthArray[0].slice(0);
@@ -138,8 +281,8 @@ export class ObjectDetector extends Script {
       const rawResponse = await (this.ai.model as Gemini).query({
         type: 'multiPart',
         parts: [
-          {inlineData: {mimeType: mimeType || undefined, data: strippedBase64}},
-          {text: textPrompt},
+          { inlineData: { mimeType: mimeType || undefined, data: strippedBase64 } },
+          { text: textPrompt },
         ],
       });
 
@@ -177,7 +320,7 @@ export class ObjectDetector extends Script {
       }
 
       const detectionPromises = parsedResponse.map(async (item) => {
-        const {ymin, xmin, ymax, xmax, objectName, ...additionalData} =
+        const { ymin, xmin, ymax, xmax, objectName, ...additionalData } =
           item || {};
         if (
           [ymin, xmin, ymax, xmax].some((coord) => typeof coord !== 'number')
@@ -194,7 +337,7 @@ export class ObjectDetector extends Script {
         const center = new THREE.Vector2();
         boundingBox.getCenter(center);
 
-        const uvInput = {u: center.x, v: center.y};
+        const uvInput = { u: center.x, v: center.y };
         const projectionMatrix = this.deviceCamera.simulatorCamera
           ? this.camera.projectionMatrix
           : new THREE.Matrix4().fromArray(this.depth.view[0].projectionMatrix);
@@ -307,7 +450,7 @@ export class ObjectDetector extends Script {
       ctx.drawImage(img, 0, 0);
 
       detections.forEach((item) => {
-        const {ymin, xmin, ymax, xmax, objectName} = (item || {}) as {
+        const { ymin, xmin, ymax, xmax, objectName } = (item || {}) as {
           ymin?: number;
           xmin?: number;
           ymax?: number;
@@ -447,12 +590,12 @@ export class ObjectDetector extends Script {
     // Create sphere.
     const sphere = new THREE.Mesh(
       new THREE.SphereGeometry(0.03, 16, 16),
-      new THREE.MeshBasicMaterial({color: 0xff4285f4})
+      new THREE.MeshBasicMaterial({ color: 0xff4285f4 })
     );
     sphere.position.copy(object.position);
 
     // Create and configure the text label using Troika.
-    const {Text} = await import('troika-three-text');
+    const { Text } = await import('troika-three-text');
     const textLabel = new Text();
     textLabel.text = object.label;
     textLabel.fontSize = 0.07;
@@ -479,7 +622,7 @@ export class ObjectDetector extends Script {
       },
       responseMimeType: 'application/json',
       responseSchema: geminiOptions.responseSchema,
-      systemInstruction: [{text: geminiOptions.systemInstruction}],
+      systemInstruction: [{ text: geminiOptions.systemInstruction }],
     };
   }
 }

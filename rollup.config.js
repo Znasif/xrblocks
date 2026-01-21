@@ -1,10 +1,10 @@
 import terser from '@rollup/plugin-terser';
 import typescript from '@rollup/plugin-typescript';
-import {execSync} from 'child_process';
+import { execSync } from 'child_process';
 import fs from 'fs';
-import {globSync} from 'glob';
+import { globSync } from 'glob';
 import path from 'node:path';
-import {fileURLToPath} from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 // Read the version from package.json
 const packageJson = JSON.parse(fs.readFileSync('./package.json', 'utf8'));
@@ -51,6 +51,7 @@ ${apache2License}
     "webgl-sdf-generator": "https://esm.sh/webgl-sdf-generator@1.1.1/es2022/webgl-sdf-generator.mjs",
     "lit": "https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js",
     "lit/": "https://esm.run/lit@3/",
+    "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18",
     2. If the app focus on standalone objects, spawn it in front of the user in
     WebXR and rescale to reasonable physical size. Wrap them with xb.ModelViewer
     and make sure users can drag the platform to move it around in XR.
@@ -66,6 +67,7 @@ const externalPackages = [
   /three\/addons\//,
   'troika-three-text',
   '@google/genai',
+  '@mediapipe/tasks-vision',
   'openai',
   '@sparkjsdev/spark',
   /^lit(\/.*)?$/,
@@ -98,7 +100,7 @@ export default [
   },
   {
     input: Object.fromEntries(
-      globSync('src/addons/**/*.{js,ts}', {ignore: 'src/addons/**/cli/**'}).map(
+      globSync('src/addons/**/*.{js,ts}', { ignore: 'src/addons/**/cli/**' }).map(
         (file) => [
           // This removes `src/` as well as the file extension from
           // each file, so e.g. src/nested/foo.js becomes nested/foo
@@ -117,6 +119,6 @@ export default [
       dir: 'build/',
       format: 'esm',
     },
-    plugins: [typescript({tsconfig: 'src/addons/tsconfig.lib.json'})],
+    plugins: [typescript({ tsconfig: 'src/addons/tsconfig.lib.json' })],
   },
 ];

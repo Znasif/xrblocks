@@ -1,21 +1,22 @@
 import 'xrblocks/addons/simulator/SimulatorAddons.js';
-import {LongSelectHandler} from 'xrblocks/addons/ui/LongSelectHandler.js';
+import { LongSelectHandler } from 'xrblocks/addons/ui/LongSelectHandler.js';
 
 import * as xb from 'xrblocks';
 
-import {XRObjectManager} from './XRObjectManager.js';
+import { XRObjectManager } from './XRObjectManager.js';
 
 const options = new xb.Options();
 options.deviceCamera.enabled = true;
 options.deviceCamera.videoConstraints = {
-  width: {ideal: 640},
-  height: {ideal: 480},
+  width: { ideal: 640 },
+  height: { ideal: 480 },
   facingMode: 'environment',
 };
 options.permissions.camera = true;
 options.reticles.enabled = false;
 options.controllers.visualizeRays = false;
 options.world.enableObjectDetection();
+options.world.objects.backendConfig.activeBackend = 'mediapipe';
 options.depth.enabled = true;
 options.depth.depthMesh.updateFullResolutionGeometry = true;
 options.depth.depthMesh.renderShadow = true;
