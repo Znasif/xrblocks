@@ -65,6 +65,7 @@
     "js-aruco2": "2.0.0",
     "jsdom": "^27.0.1",
     "lit": "^3.3.1",
+    "onnxruntime-web": "^1.30.0",
     "openai": "^6.7.0",
     "oxlint": "^1.51.0",
     "prettier": "^3.6.2",
