@@ -12,7 +12,7 @@ vi.mock('onnxruntime-web', () => ({
   env: {wasm: {}},
 }));
 
-import {RelationDetector} from './RelationDetector.js';
+import {RelationDetector, externalDataFiles} from './RelationDetector.js';
 
 const logit = (p: number) => Math.log(p / (1 - p));
 
@@ -142,5 +142,44 @@ describe('RelationDetector.decode_', () => {
     const triplets = d.decode_(out, 3, [0.1, 1, 1], null);
     expect(triplets[0].subject).toBe(2);
     expect(triplets[1].score).toBeCloseTo(0.8, 5);
+  });
+});
+
+describe('externalDataFiles', () => {
+  const model = 'relateanything_vits16plus_w16.onnx';
+
+  it("reads the authors' v2 manifest: relation.files[].path, <stem>.dataN", () => {
+    const manifest = {
+      version: 2,
+      relation: {
+        files: [
+          {path: 'models/relateanything_vits16plus_w16.onnx', size: 1},
+          {path: 'models/relateanything_vits16plus_w16.data1', size: 3},
+          {path: 'models/relateanything_vits16plus_w16.data0', size: 2},
+        ],
+      },
+      detectors: [{files: [{path: 'models/yolo26n.onnx'}]}],
+    };
+    expect(externalDataFiles(manifest, model)).toEqual([
+      'relateanything_vits16plus_w16.data0',
+      'relateanything_vits16plus_w16.data1',
+    ]);
+  });
+
+  it('accepts a models array with name fields or plain strings', () => {
+    const manifest = {
+      models: [
+        {files: [{name: 'other.onnx'}, {name: 'other.onnx.data0'}]},
+        {files: [model, `${model}.data0`]},
+      ],
+    };
+    expect(externalDataFiles(manifest, model)).toEqual([`${model}.data0`]);
+  });
+
+  it('returns nothing for a manifest without chunks', () => {
+    expect(externalDataFiles({}, model)).toEqual([]);
+    expect(
+      externalDataFiles({relation: {files: [{path: model}]}}, model)
+    ).toEqual([]);
   });
 });

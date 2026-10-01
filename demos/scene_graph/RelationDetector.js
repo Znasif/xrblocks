@@ -43,6 +43,34 @@ export const DEFAULT_PREDICATES = [
   'below',
 ];
 
+/**
+ * Names of the external-data chunks a manifest lists for `modelName`.
+ *
+ * The authors' manifest (v2) is `{relation: {files: [{path, size, sha256}]}}`
+ * with the chunks named `<stem>.data0`, `<stem>.data1`, … next to
+ * `<stem>.onnx`; the graph refers to them by exactly those basenames, so the
+ * returned names are what `externalData[].path` must be. Older layouts
+ * (`models: [{files: [...]}]`, `files` as plain strings, `name` instead of
+ * `path`, chunks called `<stem>.onnx.data0`) are accepted too.
+ */
+export function externalDataFiles(manifest, modelName) {
+  const stem = modelName.replace(/\.onnx$/, '');
+  const escaped = stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const chunk = new RegExp(`^${escaped}(\\.onnx)?\\.data\\d+$`);
+  const entries = [manifest?.relation, manifest?.models].flat().filter(Boolean);
+  const names = [];
+  for (const entry of entries) {
+    for (const file of entry.files ?? []) {
+      const path = typeof file === 'string' ? file : (file.path ?? file.name);
+      const basename = path?.split('/').pop();
+      if (basename && chunk.test(basename) && !names.includes(basename)) {
+        names.push(basename);
+      }
+    }
+  }
+  return names.sort();
+}
+
 function sigmoid(z) {
   return z >= 0 ? 1 / (1 + Math.exp(-z)) : Math.exp(z) / (1 + Math.exp(z));
 }
@@ -146,25 +174,18 @@ export class RelationDetector {
   }
 
   async loadExternalData_(onStatus) {
-    const manifestUrl = this.modelUrl.replace(/[^/]+$/, 'manifest.json');
+    const base = this.modelUrl.replace(/[^/]+$/, '');
+    const name = this.modelUrl.split('/').pop();
     try {
-      const response = await fetch(manifestUrl);
+      const response = await fetch(base + 'manifest.json');
       if (!response.ok) return [];
       const manifest = await response.json();
-      const base = this.modelUrl.replace(/[^/]+$/, '');
-      const name = this.modelUrl.split('/').pop();
-      const entry = (manifest.models ?? manifest.relation ?? []).find?.((m) =>
-        m.files?.some((f) => (f.name ?? f) === name)
-      );
-      const files = (entry?.files ?? [])
-        .map((f) => f.name ?? f)
-        .filter((f) => f.startsWith(name + '.data'));
       const out = [];
-      for (const f of files) {
-        onStatus(`downloading ${f}…`);
-        const buf = await (await fetch(base + f)).arrayBuffer();
+      for (const file of externalDataFiles(manifest, name)) {
+        onStatus(`downloading ${file}…`);
+        const buf = await (await fetch(base + file)).arrayBuffer();
         this.modelBytes += buf.byteLength;
-        out.push({path: f, data: new Uint8Array(buf)});
+        out.push({path: file, data: new Uint8Array(buf)});
       }
       return out;
     } catch {
