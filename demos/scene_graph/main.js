@@ -1,6 +1,11 @@
 import * as THREE from 'three';
 import * as xb from 'xrblocks';
 
+import {
+  DEFAULT_MATCH_SCORE,
+  ObjectFinder,
+  int16ToFloat32,
+} from './ObjectFinder.js';
 import {RelationDetector} from './RelationDetector.js';
 import {SceneGraph} from './SceneGraph.js';
 
@@ -9,10 +14,17 @@ import {SceneGraph} from './SceneGraph.js';
 // (subject, predicate, object) edges between them, the depth mesh grounds
 // each node to a 3D point, and scans are merged as the user moves. The graph
 // is the data structure a voice tool router queries ("what is on the table?").
+// EmbeddingGemma 2 then answers spoken questions against it: the question is
+// embedded straight from the microphone, each node from its label and image
+// crop, and the closest node is highlighted in the room.
 
 const params = new URLSearchParams(location.search);
 const SPATIAL_COLOR = 0x5ba7ff;
 const SEMANTIC_COLOR = 0xffb347;
+const HIGHLIGHT_COLOR = 0xff4fd1;
+const HIGHLIGHT_CSS = '#ff4fd1';
+/** Scans kept for indexing while EmbeddingGemma 2 is still loading. */
+const MAX_PENDING_SCANS = 6;
 const MOVE_RESCAN_M = 0.5;
 const TURN_RESCAN_RAD = 0.6;
 const RESCAN_COOLDOWN_MS = 4000;
@@ -52,6 +64,28 @@ function makeLabelSprite(text, background) {
   return sprite;
 }
 
+function makeRingSprite() {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 128;
+  const ctx = canvas.getContext('2d');
+  ctx.strokeStyle = HIGHLIGHT_CSS;
+  ctx.lineWidth = 10;
+  ctx.beginPath();
+  ctx.arc(64, 64, 52, 0, Math.PI * 2);
+  ctx.stroke();
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: texture,
+      depthTest: false,
+      transparent: true,
+    })
+  );
+  sprite.renderOrder = 11;
+  return sprite;
+}
+
 class SceneGraphDemo extends xb.Script {
   constructor() {
     super();
@@ -67,6 +101,22 @@ class SceneGraphDemo extends xb.Script {
       usePerPredicateThresholds: params.has('bankthr'),
     });
     this.relationsError = null;
+    this.finder =
+      params.get('voice') === '0'
+        ? null
+        : new ObjectFinder({
+            dtype: params.get('egdtype') ?? 'q4',
+            preferWebGPU: params.get('backend') !== 'wasm',
+            minScore: Number(params.get('match') ?? DEFAULT_MATCH_SCORE),
+          });
+    this.finderError = null;
+    this.pendingIndex = [];
+    this.highlightId = null;
+    this.highlightRing = null;
+    this.lastPreview = null;
+    this.queries = [];
+    this.listening = null;
+    this.inXR = false;
     this.busy = false;
     this.auto = params.get('auto') !== '0';
     this.scans = [];
@@ -88,6 +138,10 @@ class SceneGraphDemo extends xb.Script {
       preview: document.getElementById('preview'),
       scan: document.getElementById('scan'),
       auto: document.getElementById('auto'),
+      talk: document.getElementById('talk'),
+      askForm: document.getElementById('askForm'),
+      askText: document.getElementById('askText'),
+      answer: document.getElementById('answer'),
     };
     this.ui.scan?.addEventListener('click', () => this.scan());
     this.ui.auto?.addEventListener('click', () => {
@@ -95,6 +149,22 @@ class SceneGraphDemo extends xb.Script {
       this.ui.auto.classList.toggle('active', this.auto);
     });
     this.ui.auto?.classList.toggle('active', this.auto);
+    const talk = this.ui.talk;
+    talk?.addEventListener('pointerdown', (event) => {
+      talk.setPointerCapture?.(event.pointerId);
+      this.startListening();
+    });
+    talk?.addEventListener('pointerup', () => this.stopListening());
+    talk?.addEventListener('pointercancel', () => this.stopListening());
+    this.ui.askForm?.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const text = this.ui.askText?.value.trim();
+      if (text) this.askText(text);
+    });
+    if (!this.finder) {
+      this.ui.answer?.replaceChildren('voice search off (?voice=0)');
+      talk?.setAttribute('disabled', '');
+    }
     window.sceneGraphDemo = this;
 
     this.relations
@@ -105,7 +175,178 @@ class SceneGraphDemo extends xb.Script {
         this.setStatus(
           `relations off (${this.relationsError}); running detector + depth only`
         );
-      });
+      })
+      // Load the search model after the relation head so the two downloads
+      // do not compete; scans made meanwhile are indexed once it is ready.
+      .finally(() => this.loadFinder());
+  }
+
+  async loadFinder() {
+    if (!this.finder) return;
+    try {
+      await this.finder.load((text) => this.setAnswer(text));
+      this.setAnswer('hold “ask” and say what you are looking for');
+      const pending = this.pendingIndex.splice(0);
+      for (const scan of pending) await this.indexScan(scan);
+    } catch (error) {
+      console.warn('[scene_graph] EmbeddingGemma 2 unavailable', error);
+      this.finderError = error?.message ?? String(error);
+      this.pendingIndex = [];
+      this.setAnswer(`voice search off (${this.finderError})`);
+    }
+  }
+
+  setAnswer(text) {
+    this.ui.answer?.replaceChildren(text);
+    console.debug('[scene_graph:search]', text);
+  }
+
+  /** Embeds every detection of one scan into its scene-graph node. */
+  async indexScan({ids, labels, boxes, imageData}) {
+    for (let i = 0; i < ids.length; i++) {
+      await this.finder.addObservation(ids[i], labels[i], imageData, boxes[i]);
+    }
+  }
+
+  // Hold-to-talk on a headset: pinch (or trigger) anywhere while in XR.
+  onXRSessionStarted() {
+    this.inXR = true;
+  }
+
+  onXRSessionEnded() {
+    this.inXR = false;
+  }
+
+  onSelectStart() {
+    if (this.inXR) this.startListening();
+  }
+
+  onSelectEnd() {
+    if (this.inXR) this.stopListening();
+  }
+
+  startListening() {
+    if (this.listening) return;
+    if (!this.finder?.ready) {
+      this.setAnswer(
+        this.finderError
+          ? `voice search off (${this.finderError})`
+          : 'EmbeddingGemma 2 is still loading…'
+      );
+      return;
+    }
+    this.ui.talk?.classList.add('active');
+    if (this.ui.talk) this.ui.talk.textContent = 'listening… release';
+    this.setAnswer('listening…');
+    const sound = xb.core.sound;
+    this.listening = sound
+      .startRecording()
+      .then(() => sound.getRecordingSampleRate());
+  }
+
+  async stopListening() {
+    const started = this.listening;
+    if (!started) return null;
+    this.listening = null;
+    this.ui.talk?.classList.remove('active');
+    if (this.ui.talk) this.ui.talk.textContent = 'hold to ask';
+    // Recording starts asynchronously; a quick tap must not leave it running.
+    const rate = await started.catch(() => null);
+    const buffer = xb.core.sound.stopRecording();
+    if (!buffer || !rate) {
+      this.setAnswer('no microphone audio');
+      return null;
+    }
+    return this.askAudio(int16ToFloat32(buffer), rate);
+  }
+
+  /** Answers a spoken question given raw samples at any rate. */
+  async askAudio(samples, sampleRate) {
+    if (!this.finder?.ready) {
+      this.setAnswer('EmbeddingGemma 2 is still loading…');
+      return null;
+    }
+    const t0 = performance.now();
+    this.setAnswer('searching…');
+    const query = await this.finder.embedSpeech(samples, sampleRate);
+    if (!query) {
+      this.setAnswer('did not hear any speech');
+      return null;
+    }
+    return this.answer_(query, {
+      kind: 'speech',
+      label: `${query.seconds.toFixed(1)} s of speech`,
+      ms: performance.now() - t0,
+    });
+  }
+
+  /** Answers a typed question. */
+  async askText(text) {
+    if (!this.finder?.ready) {
+      this.setAnswer('EmbeddingGemma 2 is still loading…');
+      return null;
+    }
+    const t0 = performance.now();
+    const query = await this.finder.embedText(text);
+    return this.answer_(query, {
+      kind: 'text',
+      label: `“${text}”`,
+      ms: performance.now() - t0,
+    });
+  }
+
+  answer_(query, meta) {
+    const ranked = this.finder.search(query.vector);
+    const match = this.finder.match(query.vector);
+    this.highlightId = match?.id ?? null;
+    this.renderGraph();
+    if (this.lastPreview) this.drawPreview(...this.lastPreview);
+
+    const nodes = this.graph.nodes;
+    const top = ranked.slice(0, 3).map((r) => ({
+      id: r.id,
+      label: nodes.get(r.id)?.label,
+      score: +r.score.toFixed(3),
+    }));
+    const answer = this.ui.answer;
+    if (answer) {
+      const head = document.createElement('div');
+      head.className = 'query';
+      head.textContent = `${meta.label} · ${meta.ms.toFixed(0)} ms`;
+      const body = document.createElement('div');
+      if (match) {
+        body.className = 'hit';
+        body.textContent = this.graph.describe(match.id);
+      } else {
+        body.textContent = top.length
+          ? `not found (closest: ${top[0].label} ${top[0].score.toFixed(2)})`
+          : 'nothing indexed yet: scan first';
+      }
+      const alts = document.createElement('div');
+      alts.className = 'alts';
+      alts.textContent = top
+        .map((t) => `${t.label} ${t.score.toFixed(2)}`)
+        .join(' · ');
+      answer.replaceChildren(head, body, alts);
+    }
+    const record = {
+      at: Date.now(),
+      kind: meta.kind,
+      query: meta.label,
+      ms: +meta.ms.toFixed(0),
+      match: match
+        ? {
+            id: match.id,
+            label: nodes.get(match.id)?.label,
+            score: +match.score.toFixed(3),
+            margin: +match.margin.toFixed(3),
+            description: this.graph.describe(match.id),
+          }
+        : null,
+      top,
+    };
+    this.queries.push(record);
+    return record;
   }
 
   setStatus(text) {
@@ -150,6 +391,10 @@ class SceneGraphDemo extends xb.Script {
   }
 
   update() {
+    if (this.highlightRing) {
+      const pulse = 0.24 * (1 + 0.2 * Math.sin(performance.now() / 160));
+      this.highlightRing.scale.set(pulse, pulse, 1);
+    }
     // Billboarding is handled by sprites. Re-scan once the user has moved.
     if (!this.auto || this.busy) return;
     if (performance.now() - this.lastScanAt < RESCAN_COOLDOWN_MS) return;
@@ -225,10 +470,25 @@ class SceneGraphDemo extends xb.Script {
       }));
       const ids = this.graph.ingest(grounded, relation.triplets);
       timings.ground = performance.now() - t2;
-      timings.total = performance.now() - t0;
 
       this.renderGraph();
-      this.drawPreview(imageData, grounded, relation.triplets);
+      this.drawPreview(imageData, grounded, relation.triplets, ids);
+
+      // Index each detection for voice search under its graph node.
+      const scanIndex = {ids, labels, boxes, imageData};
+      if (this.finder?.ready && ids.length) {
+        this.setStatus(`indexing ${ids.length} objects for search…`);
+        const t3 = performance.now();
+        await this.indexScan(scanIndex);
+        timings.embed = performance.now() - t3;
+      } else if (this.finder && !this.finderError && ids.length) {
+        this.pendingIndex.push(scanIndex);
+        this.pendingIndex.splice(
+          0,
+          this.pendingIndex.length - MAX_PENDING_SCANS
+        );
+      }
+      timings.total = performance.now() - t0;
       const record = {
         at: Date.now(),
         camera: {
@@ -296,17 +556,44 @@ class SceneGraphDemo extends xb.Script {
 
   renderGraph() {
     this.markers.clear();
+    this.highlightRing = null;
+    const focus = this.highlightId;
     const nodeSprites = new Map();
     for (const node of this.graph.nodes.values()) {
       if (!node.point) continue;
+      const hit = node.id === focus;
       const dot = new THREE.Mesh(
-        new THREE.SphereGeometry(0.035, 12, 12),
-        new THREE.MeshBasicMaterial({color: 0xffffff})
+        new THREE.SphereGeometry(hit ? 0.05 : 0.035, 12, 12),
+        new THREE.MeshBasicMaterial({color: hit ? HIGHLIGHT_COLOR : 0xffffff})
       );
       dot.position.copy(node.point);
       this.markers.add(dot);
-      const label = makeLabelSprite(node.label, 'rgba(20,28,40,0.85)');
+      const label = makeLabelSprite(
+        node.label,
+        hit ? 'rgba(200,40,165,0.95)' : 'rgba(20,28,40,0.85)'
+      );
       label.position.copy(node.point).add(new THREE.Vector3(0, 0.1, 0));
+      if (hit) {
+        label.scale.multiplyScalar(1.4);
+        label.position.y += 0.35;
+        // A ring on the object and a beacon line up to its label.
+        this.highlightRing = makeRingSprite();
+        this.highlightRing.position.copy(node.point);
+        this.markers.add(this.highlightRing);
+        const beacon = new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints([
+            node.point,
+            label.position.clone(),
+          ]),
+          new THREE.LineBasicMaterial({
+            color: HIGHLIGHT_COLOR,
+            depthTest: false,
+            transparent: true,
+          })
+        );
+        beacon.renderOrder = 11;
+        this.markers.add(beacon);
+      }
       this.markers.add(label);
       nodeSprites.set(node.id, node.point);
     }
@@ -314,12 +601,19 @@ class SceneGraphDemo extends xb.Script {
       const a = nodeSprites.get(edge.sub);
       const b = nodeSprites.get(edge.obj);
       if (!a || !b) continue;
+      // With a highlighted node, its relations stay bright and the rest fade.
+      const faded = focus && edge.sub !== focus && edge.obj !== focus;
       const color = edge.spatial ? SPATIAL_COLOR : SEMANTIC_COLOR;
       const line = new THREE.Line(
         new THREE.BufferGeometry().setFromPoints([a, b]),
-        new THREE.LineBasicMaterial({color, transparent: true, opacity: 0.9})
+        new THREE.LineBasicMaterial({
+          color,
+          transparent: true,
+          opacity: faded ? 0.15 : 0.9,
+        })
       );
       this.markers.add(line);
+      if (faded) continue;
       const mid = a.clone().lerp(b, 0.5);
       const tag = makeLabelSprite(
         edge.predicate,
@@ -336,7 +630,8 @@ class SceneGraphDemo extends xb.Script {
         .slice(0, 24)
         .map(
           (e) =>
-            `<li class="${e.spatial ? 'spatial' : 'semantic'}">` +
+            `<li class="${e.spatial ? 'spatial' : 'semantic'}` +
+            `${focus && (e.sub === focus || e.obj === focus) ? ' hit' : ''}">` +
             `${nodes.get(e.sub)?.label} <b>${e.predicate}</b> ${nodes.get(e.obj)?.label}` +
             `<span class="score">${e.score.toFixed(2)}</span></li>`
         )
@@ -344,7 +639,8 @@ class SceneGraphDemo extends xb.Script {
     }
   }
 
-  drawPreview(imageData, grounded, triplets) {
+  drawPreview(imageData, grounded, triplets, ids = []) {
+    this.lastPreview = [imageData, grounded, triplets, ids];
     const canvas = this.ui.preview;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -384,6 +680,13 @@ class SceneGraphDemo extends xb.Script {
       ctx.lineTo(((b[0] + b[2]) / 2) * W, ((b[1] + b[3]) / 2) * H);
       ctx.stroke();
     }
+    grounded.forEach((g, i) => {
+      if (!this.highlightId || ids[i] !== this.highlightId) return;
+      const [x0, y0, x1, y1] = g.box;
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = HIGHLIGHT_CSS;
+      ctx.strokeRect(x0 * W, y0 * H, (x1 - x0) * W, (y1 - y0) * H);
+    });
   }
 
   async updateMetrics(record) {
@@ -417,6 +720,24 @@ class SceneGraphDemo extends xb.Script {
         `${record.timings.relate} ms (${record.timings.relateRun} ms)`,
       ],
       ['scan total', `${record.timings.total} ms`],
+      [
+        'search model',
+        this.finder?.ready
+          ? `EmbeddingGemma 2 ${this.finder.dtype} on ${this.finder.backend}, ` +
+            `${(this.finder.modelBytes / MB).toFixed(0)} MB`
+          : this.finderError
+            ? 'unavailable'
+            : this.finder
+              ? 'loading'
+              : 'off',
+      ],
+      [
+        'index',
+        this.finder
+          ? `${this.finder.vectors.size} nodes` +
+            (record.timings.embed ? ` (${record.timings.embed} ms)` : '')
+          : '-',
+      ],
       ['JS heap', memory.jsHeapMB ? `${memory.jsHeapMB.toFixed(0)} MB` : '-'],
       [
         'page memory',
@@ -491,6 +812,22 @@ class SceneGraphDemo extends xb.Script {
       descriptions: [...this.graph.nodes.keys()].map((id) =>
         this.graph.describe(id)
       ),
+      search: this.finder
+        ? {
+            backend: this.finder.backend,
+            error: this.finderError,
+            dtype: this.finder.dtype,
+            modelMB: +(this.finder.modelBytes / MB).toFixed(1),
+            loadMs: +this.finder.loadMs.toFixed(0),
+            minScore: this.finder.minScore,
+            indexed: [...this.finder.vectors].map(([id, e]) => ({
+              id,
+              label: e.label,
+              views: e.views,
+            })),
+            queries: this.queries,
+          }
+        : null,
     };
   }
 }
@@ -499,6 +836,8 @@ function start() {
   const options = new xb.Options();
   options.deviceCamera.enabled = true;
   options.permissions.camera = true;
+  // Voice search records from the microphone; ask before the session starts.
+  options.permissions.microphone = params.get('voice') !== '0';
   // ObjectDetector declares the AI service as a dependency even when the
   // on-device MediaPipe backend is selected, so it has to be enabled. No key
   // is needed: without one the AI module only logs a warning.
